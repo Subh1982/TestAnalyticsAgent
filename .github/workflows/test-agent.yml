@@ -37,14 +37,46 @@ jobs:
       - name: Run agent
         run: python accorplus_homepage_agent.py sample_homepage_data.csv --output outputs/test_report.md
 
+      - name: Create weekly sample inputs
+        run: |
+          mkdir -p weekly_samples
+          cat > weekly_samples/week_1.csv <<'CSV'
+          Date,Page Path,Users,Sessions,Engaged Sessions,Engagement Rate,Avg Engagement Time (sec),Conversions,Revenue AUD
+          2026-05-01,/,7800,9900,6350,0.64,101,82,28700
+          2026-05-02,/,7600,9700,6200,0.64,99,79,27650
+          2026-05-03,/,7400,9400,6020,0.64,97,75,26250
+          2026-05-04,/,8100,10300,6700,0.65,105,88,30800
+          2026-05-05,/,8200,10450,6750,0.65,106,90,31500
+          2026-05-06,/,8000,10200,6600,0.65,104,87,30450
+          2026-05-07,/,7900,10050,6480,0.64,102,84,29400
+          CSV
+          cat > weekly_samples/week_2.csv <<'CSV'
+          Date,Page Path,Users,Sessions,Engaged Sessions,Engagement Rate,Avg Engagement Time (sec),Conversions,Revenue AUD
+          2026-05-08,/,8300,10600,6850,0.65,107,92,32200
+          2026-05-09,/,8500,10850,7020,0.65,109,95,33250
+          2026-05-10,/,8400,10700,6950,0.65,108,93,32550
+          2026-05-11,/,8000,10200,6600,0.65,103,86,30100
+          2026-05-12,/,7900,10100,6500,0.64,101,85,29750
+          2026-05-13,/,8050,10250,6620,0.65,104,87,30450
+          2026-05-14,/,8150,10350,6700,0.65,105,88,30800
+          CSV
+
+      - name: Run weekly folder analysis
+        run: python accorplus_homepage_agent.py weekly_samples --output outputs/weekly_test_report.md
+
       - name: Verify report
         run: |
           test -s outputs/test_report.md
           grep -q "Accor Plus Homepage Analytics Report" outputs/test_report.md
           grep -q "Recommended Improvements" outputs/test_report.md
+          test -s outputs/weekly_test_report.md
+          grep -q "Week-by-Week Trends" outputs/weekly_test_report.md
+          grep -q "week_1.csv" outputs/weekly_test_report.md
 
       - name: Upload generated report
         uses: actions/upload-artifact@v4
         with:
           name: accorplus-homepage-test-report
-          path: outputs/test_report.md
+          path: |
+            outputs/test_report.md
+            outputs/weekly_test_report.md

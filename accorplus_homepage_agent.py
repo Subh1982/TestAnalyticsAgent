@@ -5,6 +5,7 @@ Accor Plus homepage analytics agent.
 Usage:
   python accorplus_homepage_agent.py /path/to/raw_data.xlsx
   python accorplus_homepage_agent.py /path/to/raw_data.csv --output outputs/report.md
+  python accorplus_homepage_agent.py /path/to/weekly_files/ --output outputs/report.md
 """
 
 from __future__ import annotations
@@ -80,6 +81,23 @@ def read_source(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(path)
 
+    if path.is_dir():
+        files = sorted(
+            file
+            for file in path.iterdir()
+            if file.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".csv"}
+            and not file.name.startswith("~$")
+        )
+        if not files:
+            raise ValueError(f"No Excel or CSV files found in {path}")
+
+        frames = []
+        for file in files:
+            frame = read_source(file)
+            frame["source_file"] = file.name
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True)
+
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xlsm", ".xls"}:
         df = pd.read_excel(path)
@@ -88,7 +106,9 @@ def read_source(path: Path) -> pd.DataFrame:
     else:
         raise ValueError("Use an Excel workbook (.xlsx/.xls) or CSV file.")
 
-    return canonicalize_columns(df)
+    cleaned = canonicalize_columns(df)
+    cleaned["source_file"] = path.name
+    return cleaned
 
 
 def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,6 +140,8 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     prepared["revenue_per_conversion"] = prepared["revenue_aud"] / prepared["conversions"]
     prepared["sessions_per_user"] = prepared["sessions"] / prepared["users"]
     prepared["unengaged_sessions"] = prepared["sessions"] - prepared["engaged_sessions"]
+    prepared["week_start"] = prepared["date"].dt.to_period("W-MON").dt.start_time
+    prepared["week_end"] = prepared["date"].dt.to_period("W-MON").dt.end_time.dt.normalize()
     return prepared
 
 
@@ -281,6 +303,92 @@ def build_recommendations(df: pd.DataFrame) -> list[Insight]:
     ]
 
 
+def summarize_weeks(df: pd.DataFrame) -> pd.DataFrame:
+    if "source_file" in df and df["source_file"].nunique() > 1:
+        group_cols = ["source_file"]
+    else:
+        group_cols = ["week_start", "week_end"]
+
+    weekly = (
+        df.groupby(group_cols, as_index=False, sort=False)
+        .agg(
+            week_start=("date", "min"),
+            week_end=("date", "max"),
+            users=("users", "sum"),
+            sessions=("sessions", "sum"),
+            engaged_sessions=("engaged_sessions", "sum"),
+            conversions=("conversions", "sum"),
+            revenue_aud=("revenue_aud", "sum"),
+            avg_engagement_time_sec=("avg_engagement_time_sec", lambda value: weighted_average(value, df.loc[value.index, "sessions"])),
+        )
+        .sort_values("week_start")
+        .reset_index(drop=True)
+    )
+    weekly["engagement_rate"] = weekly["engaged_sessions"] / weekly["sessions"]
+    weekly["conversion_rate"] = weekly["conversions"] / weekly["sessions"]
+    weekly["revenue_per_session"] = weekly["revenue_aud"] / weekly["sessions"]
+
+    for col in ["sessions", "conversions", "revenue_aud", "conversion_rate", "revenue_per_session"]:
+        weekly[f"{col}_wow"] = weekly[col].pct_change()
+
+    return weekly
+
+
+def build_weekly_trend_section(df: pd.DataFrame) -> list[str]:
+    weekly = summarize_weeks(df)
+    if len(weekly) < 2:
+        return [
+            "## Week-by-Week Trends",
+            "",
+            "At least two weeks of data are needed for week-by-week comparison.",
+            "",
+        ]
+
+    first_week = weekly.iloc[0]
+    last_week = weekly.iloc[-1]
+    best_revenue_week = weekly.loc[weekly["revenue_aud"].idxmax()]
+    best_conversion_week = weekly.loc[weekly["conversion_rate"].idxmax()]
+
+    lines = [
+        "## Week-by-Week Trends",
+        "",
+        (
+            f"Across {len(weekly)} weeks, revenue moved from {money(first_week['revenue_aud'])} "
+            f"in the first week to {money(last_week['revenue_aud'])} in the latest week "
+            f"({signed_pct(pct_change(last_week['revenue_aud'], first_week['revenue_aud']))}). "
+            f"Sessions moved {signed_pct(pct_change(last_week['sessions'], first_week['sessions']))}, "
+            f"while conversions moved {signed_pct(pct_change(last_week['conversions'], first_week['conversions']))}."
+        ),
+        "",
+        (
+            f"Best revenue week: {best_revenue_week['week_start'].date()} to "
+            f"{best_revenue_week['week_end'].date()} with {money(best_revenue_week['revenue_aud'])}. "
+            f"Best conversion-rate week: {best_conversion_week['week_start'].date()} to "
+            f"{best_conversion_week['week_end'].date()} at {pct(best_conversion_week['conversion_rate'])}."
+        ),
+        "",
+        "| Week | Sessions | WoW | Engagement Rate | Avg Engagement Time | Conversions | WoW | Conversion Rate | Revenue | WoW | Revenue / Session |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+
+    for _, row in weekly.iterrows():
+        week_label = f"{row['week_start'].date()} to {row['week_end'].date()}"
+        if "source_file" in row and pd.notna(row["source_file"]):
+            week_label = f"{row['source_file']} ({week_label})"
+        sessions_wow = "-" if pd.isna(row["sessions_wow"]) else signed_pct(row["sessions_wow"])
+        conversions_wow = "-" if pd.isna(row["conversions_wow"]) else signed_pct(row["conversions_wow"])
+        revenue_wow = "-" if pd.isna(row["revenue_aud_wow"]) else signed_pct(row["revenue_aud_wow"])
+        lines.append(
+            f"| {week_label} | {num(row['sessions'])} | {sessions_wow} | "
+            f"{pct(row['engagement_rate'])} | {row['avg_engagement_time_sec']:.0f} sec | "
+            f"{num(row['conversions'])} | {conversions_wow} | {pct(row['conversion_rate'])} | "
+            f"{money(row['revenue_aud'])} | {revenue_wow} | {money(row['revenue_per_session'])} |"
+        )
+
+    lines.append("")
+    return lines
+
+
 def build_report(df: pd.DataFrame, source: Path) -> str:
     totals = {
         "users": df["users"].sum(),
@@ -299,6 +407,8 @@ def build_report(df: pd.DataFrame, source: Path) -> str:
     date_min = df["date"].min().date()
     date_max = df["date"].max().date()
     paths = ", ".join(sorted(df["page_path"].astype(str).unique()))
+    source_label = f"folder `{source.name}`" if source.is_dir() else f"file `{source.name}`"
+    source_files = sorted(df["source_file"].dropna().astype(str).unique()) if "source_file" in df else []
 
     observations = build_observations(df)
     recommendations = build_recommendations(df)
@@ -306,43 +416,59 @@ def build_report(df: pd.DataFrame, source: Path) -> str:
     lines = [
         "# Accor Plus Homepage Analytics Report",
         "",
-        f"Source file: `{source.name}`",
+        f"Source: {source_label}",
         f"Period: {date_min} to {date_max}",
         f"Page path(s): {paths}",
         "",
-        "## Executive Summary",
-        "",
-        (
-            f"The homepage generated {num(totals['sessions'])} sessions from {num(totals['users'])} users, "
-            f"with {num(totals['conversions'])} conversions and {money(totals['revenue_aud'])} revenue. "
-            f"Weighted engagement rate was {pct(weighted_engagement_rate)}, average engagement time was "
-            f"{avg_time_weighted:.0f} seconds, and conversion rate was {pct(weighted_conversion_rate)}."
-        ),
-        "",
-        "## KPI Snapshot",
-        "",
-        "| Metric | Value |",
-        "|---|---:|",
-        f"| Users | {num(totals['users'])} |",
-        f"| Sessions | {num(totals['sessions'])} |",
-        f"| Engaged sessions | {num(totals['engaged_sessions'])} |",
-        f"| Engagement rate | {pct(weighted_engagement_rate)} |",
-        f"| Avg engagement time | {avg_time_weighted:.0f} sec |",
-        f"| Conversions | {num(totals['conversions'])} |",
-        f"| Conversion rate | {pct(weighted_conversion_rate)} |",
-        f"| Revenue | {money(totals['revenue_aud'])} |",
-        f"| Revenue / session | {money(revenue_per_session)} |",
-        f"| Revenue / user | {money(revenue_per_user)} |",
-        f"| Revenue / conversion | {money(revenue_per_conversion)} |",
-        "",
-        "## Observations",
-        "",
     ]
+
+    if len(source_files) > 1:
+        lines.extend(
+            [
+                "Source files:",
+                *[f"- `{file}`" for file in source_files],
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "## Executive Summary",
+            "",
+            (
+                f"The homepage generated {num(totals['sessions'])} sessions from {num(totals['users'])} users, "
+                f"with {num(totals['conversions'])} conversions and {money(totals['revenue_aud'])} revenue. "
+                f"Weighted engagement rate was {pct(weighted_engagement_rate)}, average engagement time was "
+                f"{avg_time_weighted:.0f} seconds, and conversion rate was {pct(weighted_conversion_rate)}."
+            ),
+            "",
+            "## KPI Snapshot",
+            "",
+            "| Metric | Value |",
+            "|---|---:|",
+            f"| Users | {num(totals['users'])} |",
+            f"| Sessions | {num(totals['sessions'])} |",
+            f"| Engaged sessions | {num(totals['engaged_sessions'])} |",
+            f"| Engagement rate | {pct(weighted_engagement_rate)} |",
+            f"| Avg engagement time | {avg_time_weighted:.0f} sec |",
+            f"| Conversions | {num(totals['conversions'])} |",
+            f"| Conversion rate | {pct(weighted_conversion_rate)} |",
+            f"| Revenue | {money(totals['revenue_aud'])} |",
+            f"| Revenue / session | {money(revenue_per_session)} |",
+            f"| Revenue / user | {money(revenue_per_user)} |",
+            f"| Revenue / conversion | {money(revenue_per_conversion)} |",
+            "",
+            "## Observations",
+            "",
+        ]
+    )
 
     for item in observations:
         lines.append(f"### {item.title}")
         lines.append(item.detail)
         lines.append("")
+
+    lines.extend(build_weekly_trend_section(df))
 
     lines.extend(
         [
@@ -378,7 +504,7 @@ def build_report(df: pd.DataFrame, source: Path) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze Accor Plus homepage GA4 raw data.")
-    parser.add_argument("source", type=Path, help="Path to the raw GA4 Excel or CSV file.")
+    parser.add_argument("source", type=Path, help="Path to a raw GA4 Excel/CSV file, or a folder of weekly files.")
     parser.add_argument(
         "--output",
         type=Path,
