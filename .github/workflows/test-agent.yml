@@ -1,0 +1,44 @@
+name: Test analytics agent
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create sample input
+        run: |
+          cat > sample_homepage_data.csv <<'CSV'
+          Date,Page Path,Users,Sessions,Engaged Sessions,Engagement Rate,Avg Engagement Time (sec),Conversions,Revenue AUD
+          2026-05-01,/,7800,9900,6350,0.64,101,82,28700
+          2026-05-02,/,7600,9700,6200,0.64,99,79,27650
+          2026-05-03,/,7400,9400,6020,0.64,97,75,26250
+          2026-05-04,/,8100,10300,6700,0.65,105,88,30800
+          2026-05-05,/,8200,10450,6750,0.65,106,90,31500
+          2026-05-06,/,8000,10200,6600,0.65,104,87,30450
+          2026-05-07,/,7900,10050,6480,0.64,102,84,29400
+          CSV
+
+      - name: Run agent
+        run: python accorplus_homepage_agent.py sample_homepage_data.csv --output outputs/test_report.md
+
+      - name: Verify report
+        run: |
+          test -s outputs/test_report.md
+          grep -q "Accor Plus Homepage Analytics Report" outputs/test_report.md
+          grep -q "Recommended Improvements" outputs/test_report.md
