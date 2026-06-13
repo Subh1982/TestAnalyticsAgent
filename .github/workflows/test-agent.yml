@@ -42,3 +42,9 @@ jobs:
           test -s outputs/test_report.md
           grep -q "Accor Plus Homepage Analytics Report" outputs/test_report.md
           grep -q "Recommended Improvements" outputs/test_report.md
+
+      - name: Upload generated report
+        uses: actions/upload-artifact@v4
+        with:
+          name: accorplus-homepage-test-report
+          path: outputs/test_report.md
